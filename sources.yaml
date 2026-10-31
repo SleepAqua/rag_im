@@ -1,0 +1,41 @@
+# Immigration policy sources.
+#
+# `id` is a stable local key; `url` is the canonical government page. Selector
+# hints are best-effort: if the site changes its markup the extractor falls
+# back to the whole document instead of failing.
+
+sources:
+  - id: au_189
+    country: AU
+    name: Skilled Independent visa (subclass 189)
+    url: https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-independent-189
+    selector: "#content"
+    notes: Points-tested permanent residence, no sponsor required.
+
+  - id: au_491
+    country: AU
+    name: Skilled Work Regional (Provisional) visa (subclass 491)
+    url: https://immi.homeaffairs.gov.au/visas/getting-a-visa/visa-listing/skilled-work-regional-provisional-491
+    selector: "#content"
+    notes: Regional provisional visa, nominated by a state or family member.
+
+  - id: nz_aewv
+    country: NZ
+    name: Accredited Employer Work Visa (AEWV)
+    url: https://www.immigration.govt.nz/new-zealand-visas/apply-for-a-visa/about-visa/accredited-employer-work-visa
+    selector: main
+    notes: Main temporary work route; employer must hold accreditation.
+
+  - id: nl_hsm
+    country: NL
+    name: Highly Skilled Migrant residence permit
+    url: https://ind.nl/en/residence-permits/work/highly-skilled-migrant
+    selector: main
+    notes: Salary-threshold based; recognised sponsor required.
+
+  - id: ca_express_entry
+    country: CA
+    name: Express Entry (economic immigration)
+    url: https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/express-entry.html
+    selector: main
+    notes: CRS-ranked pool for FSW, CEC and FST programmes.

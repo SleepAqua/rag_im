@@ -71,19 +71,19 @@ embeddings and only worked with a key and a network connection.
 cd /home/louis/coding/rag_im
 
 # 1. fetch every source in sources.yaml (needs network)
-/home/louis/.venvs/main/bin/python -m rag_im fetch
+./run.sh fetch
 
 # 2. see what you have
-/home/louis/.venvs/main/bin/python -m rag_im status
+./run.sh status
 
 # 3. compare the two most recent snapshots; writes reports/<id>-<ts>.md
-/home/louis/.venvs/main/bin/python -m rag_im diff
+./run.sh diff
 
 # 4. ranked passages with scores
-/home/louis/.venvs/main/bin/python -m rag_im search "points requirement" --top-k 5
+./run.sh search "points requirement" --top-k 5
 
 # 5. a cited answer
-/home/louis/.venvs/main/bin/python -m rag_im ask "What is the points requirement for the 189 visa?"
+./run.sh ask "What is the points requirement for the 189 visa?"
 ```
 
 Run it from a scheduler (cron/systemd timer) with `fetch`; new snapshots are
@@ -92,8 +92,8 @@ diffed automatically and reports land in `reports/`.
 ### Offline demo
 
 ```bash
-/home/louis/.venvs/main/bin/python scripts/seed_demo.py --reset
-/home/louis/.venvs/main/bin/python -m rag_im search "points requirement"
+./run.sh seed-demo --reset
+./run.sh search "points requirement"
 ```
 
 `scripts/seed_demo.py` loads the synthetic fixture pages from `tests/fixtures/`
@@ -103,7 +103,7 @@ with no network.
 ### Tests
 
 ```bash
-/home/louis/.venvs/main/bin/python -m unittest discover -s tests -v
+./run.sh test
 ```
 
 91 tests, fully offline: extraction noise removal, section splitting, hash

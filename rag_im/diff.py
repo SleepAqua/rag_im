@@ -68,7 +68,16 @@ class ChangeSet:
 
 def word_diff(old: str, new: str) -> str:
     """Inline word-level diff: ``[-gone-]`` / ``{+new+}``."""
-    a, b = normalise(old).split(), normalise(new).split()
+
+    def words(text: str) -> list[str]:
+        lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            # "- " is a list bullet here, not a diff marker; keep it readable.
+            lines.append("• " + stripped[2:].strip() if stripped.startswith("- ") else stripped)
+        return normalise(" ".join(lines)).split()
+
+    a, b = words(old), words(new)
     matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
     parts: list[str] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():

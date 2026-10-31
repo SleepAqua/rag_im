@@ -198,6 +198,24 @@ class TestFetchAll(unittest.TestCase):
             # raw HTML is kept for diagnosis
             self.assertEqual(len(list((paths.raw_dir / "au_189").glob("*.html"))), 1)
 
+    def test_shell_with_boilerplate_but_no_content_is_rejected(self):
+        # The AU pages return a 1.3 MB SPA shell: once the tag-manager text is
+        # extracted it clears the character floor but carries no policy content.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        paths = make_paths(Path(tmp.name))
+        shell = (
+            "<html><body><div id='app'><h1>Skilled Independent visa</h1>"
+            "<p>Google Tag Manager (noscript) End Google Tag Manager (noscript) "
+            "Skip to main content You are here Home Visas Working in Australia</p>"
+            "</div></body></html>"
+        )
+        with Store(paths.db_path) as store:
+            summaries = fetch_all([make_source()], store, paths, session=FakeSession([shell]))
+            self.assertEqual(summaries[0].status, "error")
+            self.assertIn("section(s)", summaries[0].message)
+            self.assertEqual(store.snapshot_count("au_189"), 0)
+
     def test_bot_wall_is_reported(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

@@ -70,6 +70,24 @@ class TestExtraction(unittest.TestCase):
         html = '<html><body><div class="card"><div class="card"><p>Same</p></div></div></body></html>'
         self.assertEqual(html_to_text(html).count("Same"), 1)
 
+    def test_sentence_wrapped_in_heading_tag_is_body_text(self):
+        # ind.nl wraps pane subtitles in <h3>; promoting a full sentence to a
+        # heading would empty out its real parent heading.
+        sentence = (
+            "Your employer can submit this application online. You must have DigiD "
+            "with SMS verification and internet banking (iDEAL)."
+        )
+        html = f"<html><body><main><h2>Application forms</h2><h3>{sentence}</h3></main></body></html>"
+        text = html_to_text(html)
+        self.assertIn("## Application forms", text)
+        self.assertNotIn("### " + sentence, text)
+        self.assertIn(sentence, text)
+
+    def test_short_heading_with_internal_full_stop_stays_a_heading(self):
+        html = "<html><body><main><h2>1. Check requirements</h2><p>Body</p></main></body></html>"
+        text = html_to_text(html)
+        self.assertIn("## 1. Check requirements", text)
+
 
 if __name__ == "__main__":
     unittest.main()

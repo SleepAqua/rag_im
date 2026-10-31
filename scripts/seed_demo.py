@@ -9,6 +9,7 @@ network. Real use is `python -m rag_im fetch`.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,9 @@ def main() -> int:
     parser.add_argument("--reset", action="store_true", help="delete the existing demo DB first")
     args = parser.parse_args()
 
-    paths = get_paths()
+    # Demo data lives in its own database: mixing fixture snapshots into the
+    # live DB makes the next real fetch look like a 20-section policy rewrite.
+    paths = get_paths(db_path=os.environ.get("RAG_IM_DEMO_DB") or "data/demo.sqlite3")
     ensure_dirs(paths)
     if args.reset and paths.db_path.exists():
         paths.db_path.unlink()

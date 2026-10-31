@@ -146,7 +146,12 @@ answer — it never prints a citation it cannot back with a stored passage.
   instead of storing a near-empty snapshot; the raw HTML is kept for diagnosis.
   Monitoring those two sources needs a rendering proxy or a browser-based
   fetcher, which this tool does not ship. The NL and CA pages extract cleanly
-  (23 and 4 sections respectively).
+  (24 and 4 sections respectively). The gate is structural, not just a
+  character count: a shell that clears the length floor with tag-manager
+  boilerplate but yields fewer than two sections is rejected too.
+- **Demo data lives in its own database.** `scripts/seed_demo.py` writes
+  `data/demo.sqlite3`; mixing fixture snapshots into `data/policy.sqlite3`
+  would make the next real fetch look like a wholesale policy rewrite.
 - **Snapshots are point-in-time.** A report tells you what changed between two
   fetches, not what the policy was before you started watching. Run `fetch`
   often; gaps are invisible.

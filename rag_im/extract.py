@@ -27,7 +27,15 @@ NOISE_TAGS = (
 )
 
 HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
+
+# Some government sites wrap paragraph copy in heading tags for styling
+# (ind.nl puts the pane subtitle inside an <h3>). A "heading" that is a full
+# sentence is body text; promoting it would leave its real parent heading with
+# an empty body and make the change report unreadable.
+MAX_HEADING_CHARS = 120
 BLOCK_TAGS = {
+    "body",  # without these, a page walked from the document root is treated
+    "html",  # as one text blob and every heading is lost
     "p",
     "div",
     "section",
@@ -72,7 +80,11 @@ def _walk(node: Tag, out: list[str]) -> None:
 
         if name in HEADING_TAGS:
             text = _clean(child.get_text(" "))
-            if text:
+            if not text:
+                continue
+            if len(text) > MAX_HEADING_CHARS or (len(text) > 60 and text.endswith(".")):
+                out.append(text)
+            else:
                 out.append("#" * HEADING_TAGS[name] + " " + text)
             continue
 
@@ -85,7 +97,9 @@ def _walk(node: Tag, out: list[str]) -> None:
         if name in ("br", "hr"):
             continue
 
-        has_block_children = bool(child.find(BLOCK_TAGS, recursive=False))
+        # A heading counts as structure too: a <main> holding only <h2>/<h3>
+        # siblings must be descended into, not flattened to one text blob.
+        has_block_children = bool(child.find(BLOCK_TAGS | set(HEADING_TAGS), recursive=False))
         if not has_block_children:
             text = _clean(child.get_text(" "))
             if text:

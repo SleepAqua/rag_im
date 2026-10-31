@@ -25,6 +25,10 @@ from .store import Store
 
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 MIN_TEXT_CHARS = 200
+# Structure, not just length: a JS shell plus tag-manager boilerplate can clear
+# the character floor while carrying no policy content at all.
+MIN_SECTIONS = 2
+MIN_BODY_CHARS = 400
 
 
 class FetchError(RuntimeError):
@@ -230,19 +234,22 @@ def fetch_all(
         # A 200 response is not necessarily a page: JS-rendered single-page apps
         # and bot walls return shells. Refuse to store an empty snapshot, which
         # would otherwise masquerade as a policy change on the next diff.
-        if len(" ".join(text.split())) < MIN_TEXT_CHARS:
+        sections = split_text(text)
+        body_chars = sum(len(s.body) for s in sections)
+        if len(" ".join(text.split())) < MIN_TEXT_CHARS or (
+            len(sections) < MIN_SECTIONS or body_chars < MIN_BODY_CHARS
+        ):
             hint = _diagnose(raw_html)
             summaries.append(
                 FetchSummary(
                     source.id,
                     "error",
-                    f"extracted only {len(text)} chars from {len(raw_html)} bytes of HTML; "
+                    f"extracted only {len(text)} chars in {len(sections)} section(s) "
+                    f"({body_chars} chars of body) from {len(raw_html)} bytes of HTML; "
                     f"reason: {hint}; raw HTML kept at {result.path}",
                 )
             )
             continue
-
-        sections = split_text(text)
         snapshot_id, created = store.add_snapshot(
             source.id,
             fetched_at=result.fetched_at,

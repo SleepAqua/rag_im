@@ -163,10 +163,13 @@ def answer_question(
     settings: LLMSettings | None = None,
     session=None,
     use_llm: bool = True,
+    use_cache: bool = True,
 ) -> Answer:
     settings = settings or config.llm_settings()
     passages = passages_from_store(store)
-    hits = Retriever(passages, settings=settings).search(question, top_k=top_k)
+    hits = Retriever(passages, settings=settings, store=store, use_cache=use_cache).search(
+        question, top_k=top_k
+    )
     if use_llm and settings.enabled:
         llm = llm_answer(question, hits, settings, session=session)
         if llm is not None:

@@ -8,6 +8,7 @@ diff over the same snapshot pair updates rather than duplicates change rows.
 from __future__ import annotations
 
 import sqlite3
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -71,6 +72,38 @@ CREATE TABLE IF NOT EXISTS changes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_changes_source ON changes(source_id, detected_at DESC);
+
+-- Dense vectors are expensive and deterministic for a given model + text, so
+-- they are cached by content hash and reused across queries and processes.
+CREATE TABLE IF NOT EXISTS embeddings (
+    model       TEXT NOT NULL,
+    text_sha    TEXT NOT NULL,
+    dim         INTEGER NOT NULL,
+    vector      BLOB NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    PRIMARY KEY (model, text_sha)
+);
+
+-- One row per source per `fetch` invocation. This is the observability table:
+-- success rate, latency, bytes and change counts over time.
+CREATE TABLE IF NOT EXISTS fetch_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT NOT NULL,
+    source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('new','unchanged','error')),
+    latency_ms   INTEGER NOT NULL,
+    bytes        INTEGER NOT NULL DEFAULT 0,
+    sections     INTEGER NOT NULL DEFAULT 0,
+    changes      INTEGER NOT NULL DEFAULT 0,
+    message      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_fetch_runs_source
+    ON fetch_runs(source_id, finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fetch_runs_run
+    ON fetch_runs(run_id);
 """
 
 
@@ -353,12 +386,155 @@ class Store:
         rows = self.changes_for(source_id, limit=1)
         return rows[0] if rows else None
 
+    # --------------------------------------------------------------- embeddings
+    def get_embeddings(self, model: str, text_hashes: Iterable[str]) -> dict[str, list[float]]:
+        """Return cached vectors for the given content hashes, missing keys omitted."""
+        keys = list(dict.fromkeys(text_hashes))
+        out: dict[str, list[float]] = {}
+        # Stay under SQLite's bound-variable limit on large corpora.
+        for start in range(0, len(keys), 500):
+            batch = keys[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.conn.execute(
+                f"SELECT text_sha, vector, dim FROM embeddings "
+                f"WHERE model=? AND text_sha IN ({placeholders})",
+                (model, *batch),
+            ).fetchall()
+            for row in rows:
+                vector = _blob_to_vec(row["vector"], int(row["dim"]))
+                if vector:
+                    out[row["text_sha"]] = vector
+        return out
+
+    def put_embeddings(self, model: str, vectors: dict[str, list[float]]) -> int:
+        """Upsert vectors keyed by content hash. Returns the number written."""
+        rows = [
+            (model, text_sha, len(vec), sqlite3.Binary(_vec_to_blob(vec)))
+            for text_sha, vec in vectors.items()
+            if vec
+        ]
+        if not rows:
+            return 0
+        self.conn.executemany(
+            """
+            INSERT INTO embeddings (model, text_sha, dim, vector)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(model, text_sha) DO UPDATE SET
+                dim=excluded.dim,
+                vector=excluded.vector,
+                created_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            """,
+            rows,
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def embedding_count(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) n FROM embeddings").fetchone()["n"])
+
+    def clear_embeddings(self, model: str | None = None) -> int:
+        if model:
+            cur = self.conn.execute("DELETE FROM embeddings WHERE model=?", (model,))
+        else:
+            cur = self.conn.execute("DELETE FROM embeddings")
+        self.conn.commit()
+        return cur.rowcount
+
+    # --------------------------------------------------------------- fetch runs
+    def record_fetch_run(
+        self,
+        *,
+        run_id: str,
+        source_id: str,
+        started_at: str,
+        finished_at: str,
+        status: str,
+        latency_ms: int,
+        bytes: int = 0,
+        sections: int = 0,
+        changes: int = 0,
+        message: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO fetch_runs
+                (run_id, source_id, started_at, finished_at, status,
+                 latency_ms, bytes, sections, changes, message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                source_id,
+                started_at,
+                finished_at,
+                status,
+                latency_ms,
+                max(0, bytes),
+                max(0, sections),
+                max(0, changes),
+                message,
+            ),
+        )
+        self.conn.commit()
+
+    def fetch_run_stats(self) -> dict[str, Any]:
+        """Aggregate fetch history: success rate, latency percentiles, freshness."""
+        rows = self.conn.execute(
+            "SELECT * FROM fetch_runs ORDER BY finished_at DESC, id DESC"
+        ).fetchall()
+        latencies = [int(r["latency_ms"]) for r in rows]
+        per_source: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            sid = row["source_id"]
+            entry = per_source.setdefault(
+                sid,
+                {
+                    "source_id": sid,
+                    "runs": 0,
+                    "ok": 0,
+                    "errors": 0,
+                    "latencies": [],
+                    "last_run": row["finished_at"],
+                    "last_status": row["status"],
+                    "last_error": None,
+                    "changes": 0,
+                    "bytes": 0,
+                },
+            )
+            entry["runs"] += 1
+            entry["latencies"].append(int(row["latency_ms"]))
+            entry["changes"] += int(row["changes"] or 0)
+            entry["bytes"] += int(row["bytes"] or 0)
+            if row["status"] == "error":
+                entry["errors"] += 1
+                if entry["last_error"] is None:
+                    entry["last_error"] = row["message"]
+            else:
+                entry["ok"] += 1
+        sources = []
+        for entry in sorted(per_source.values(), key=lambda e: e["source_id"]):
+            values = entry.pop("latencies")
+            entry["p50_ms"] = round(_percentile(values, 0.50))
+            entry["p95_ms"] = round(_percentile(values, 0.95))
+            sources.append(entry)
+        return {
+            "runs": len(rows),
+            "ok": sum(1 for r in rows if r["status"] != "error"),
+            "errors": sum(1 for r in rows if r["status"] == "error"),
+            "p50_ms": round(_percentile(latencies, 0.50)),
+            "p95_ms": round(_percentile(latencies, 0.95)),
+            "last_run": rows[0]["finished_at"] if rows else None,
+            "sources": sources,
+        }
+
     def stats(self) -> dict[str, int]:
         return {
             "sources": int(self.conn.execute("SELECT COUNT(*) n FROM sources").fetchone()["n"]),
             "snapshots": int(self.conn.execute("SELECT COUNT(*) n FROM snapshots").fetchone()["n"]),
             "sections": int(self.conn.execute("SELECT COUNT(*) n FROM sections").fetchone()["n"]),
             "changes": int(self.conn.execute("SELECT COUNT(*) n FROM changes").fetchone()["n"]),
+            "embeddings": self.embedding_count(),
+            "fetch_runs": int(self.conn.execute("SELECT COUNT(*) n FROM fetch_runs").fetchone()["n"]),
         }
 
 
@@ -366,6 +542,33 @@ def _sha(text: str) -> str:
     import hashlib
 
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _vec_to_blob(vec: list[float]) -> bytes:
+    """Little-endian float32 blob; explicit byte order keeps the DB portable."""
+    return struct.pack(f"<{len(vec)}f", *(float(x) for x in vec))
+
+
+def _blob_to_vec(blob: bytes, dim: int) -> list[float]:
+    if dim <= 0:
+        return []
+    try:
+        return list(struct.unpack(f"<{dim}f", bytes(blob)))
+    except struct.error:
+        return []
+
+
+def _percentile(values: list[int], q: float) -> float:
+    """Linear-interpolated percentile, q in [0, 1]. No numpy dependency."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    pos = (len(ordered) - 1) * q
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
 def _row_to_snapshot(row: sqlite3.Row) -> Snapshot:

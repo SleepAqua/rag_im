@@ -1,6 +1,6 @@
 """Seed the local database from fixture pages, then run a diff -- fully offline.
 
-    /home/louis/.venvs/main/bin/python scripts/seed_demo.py [--reset]
+    python scripts/seed_demo.py [--reset] [--quiet]
 
 Useful for demos and for eyeballing the report format without hitting the
 network. Real use is `python -m rag_im fetch`.
@@ -24,6 +24,7 @@ from tests.support import add_au_pair, add_nl  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reset", action="store_true", help="delete the existing demo DB first")
+    parser.add_argument("--quiet", action="store_true", help="only print the report path")
     args = parser.parse_args()
 
     # Demo data lives in its own database: mixing fixture snapshots into the
@@ -36,12 +37,15 @@ def main() -> int:
     with Store(paths.db_path) as store:
         add_au_pair(store)
         add_nl(store)
-        print(f"DB: {paths.db_path}")
-        print(f"sources={store.stats()['sources']} snapshots={store.stats()['snapshots']}")
         cs = diff_source(store, "au_189", paths)
         if cs is None or cs.report_path is None:
             print("no diff (need two snapshots)")
             return 1
+        if args.quiet:
+            print(cs.report_path)
+            return 0
+        print(f"DB: {paths.db_path}")
+        print(f"sources={store.stats()['sources']} snapshots={store.stats()['snapshots']}")
         print(f"report: {cs.report_path}")
         print()
         print(cs.report_path.read_text(encoding="utf-8"))

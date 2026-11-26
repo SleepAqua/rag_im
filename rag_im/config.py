@@ -21,8 +21,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 USER_AGENT = (
-    "rag-im/0.2 (immigration policy monitor; "
-    "+https://github.com/louis/rag_im) python-requests"
+    "rag-im/0.3 (immigration policy monitor; "
+    "+https://github.com/SleepAqua/rag_im) python-requests"
 )
 
 CONNECT_TIMEOUT = float(os.environ.get("RAG_IM_CONNECT_TIMEOUT", "10"))

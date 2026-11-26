@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Always run this project with the interpreter that has its dependencies.
-# Bare `python` on this machine can resolve to a different venv (e.g. a tool
-# venv without beautifulsoup4), so the path is pinned here.
+# Convenience wrapper for a checkout that has its dependencies installed.
+# Override the interpreter with PYTHON=/path/to/python if needed.
 set -euo pipefail
 cd "$(dirname "$0")"
-PYTHON="${PYTHON:-/home/louis/.venvs/main/bin/python}"
-if [ ! -x "$PYTHON" ]; then
+if [ -z "${PYTHON:-}" ] && [ -x ".venv/bin/python" ]; then
+  PYTHON=".venv/bin/python"
+else
+  PYTHON="${PYTHON:-python3}"
+fi
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
   echo "Interpreter not found: $PYTHON" >&2
-  echo "Set PYTHON=/path/to/python and retry." >&2
+  echo "Set PYTHON=/path/to/python, or install the package with: python -m pip install -e ." >&2
   exit 1
 fi
 case "${1:-}" in

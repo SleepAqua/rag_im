@@ -1,0 +1,22 @@
+[Unit]
+Description=rag-im immigration policy fetch
+Documentation=https://github.com/SleepAqua/rag_im
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ragim
+Group=ragim
+WorkingDirectory=/opt/rag-im
+ExecStart=/opt/rag-im/.venv/bin/rag-im run
+Environment=RAG_IM_DATA=/var/lib/rag-im
+Environment=RAG_IM_REPORTS=/var/lib/rag-im/reports
+# Exit code 1 means at least one source failed; keep the unit failed so the
+# timer's logs and `systemctl --failed` show it. Exit code 3 means another run
+# was still in progress, which is not an operational failure.
+SuccessExitStatus=0 3
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

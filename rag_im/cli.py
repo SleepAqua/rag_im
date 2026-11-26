@@ -6,11 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config
+from . import config, evaluate
 from .ask import answer_question
+from .config import LLMSettings
 from .diff import diff_source
 from .fetch import fetch_all
 from .retrieval import search as run_search
+from .runner import RunLocked, run_lock
 from .store import Store
 
 
@@ -31,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="limit to a source id (repeatable)")
     fetch.add_argument("--force", action="store_true", help="store even if the hash is unchanged")
 
+    run = sub.add_parser("run", help="fetch under a lock; suitable for cron/systemd")
+    run.add_argument("--source", action="append", dest="only", metavar="ID",
+                     help="limit to a source id (repeatable)")
+
     diff = sub.add_parser("diff", help="compare the two most recent snapshots")
     diff.add_argument("--source", action="append", dest="only", metavar="ID")
     diff.add_argument("--no-write", action="store_true", help="print only, do not write a report")
@@ -39,13 +45,26 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--top-k", type=int, default=5)
     search.add_argument("--source", action="append", dest="only", metavar="ID")
+    search.add_argument("--no-cache", action="store_true", help="ignore cached embeddings")
 
     ask = sub.add_parser("ask", help="answer a question from stored passages")
     ask.add_argument("question")
     ask.add_argument("--top-k", type=int, default=5)
     ask.add_argument("--extractive", action="store_true", help="skip the LLM even if configured")
+    ask.add_argument("--no-cache", action="store_true", help="ignore cached embeddings")
 
-    sub.add_parser("status", help="show stored sources, snapshots and last change")
+    ev = sub.add_parser("eval", help="score retrieval against labelled questions")
+    ev.add_argument("--questions", help="question set (default: eval/questions.yaml or $RAG_IM_EVAL_QUESTIONS)")
+    ev.add_argument("--top-k", type=int, default=5)
+    ev.add_argument("--min-recall", type=float, default=0.0,
+                    help="exit 1 if recall@top-k is below this fraction (default: report only)")
+    ev.add_argument("--hybrid", action="store_true",
+                    help="also use dense retrieval (needs an API key; default is BM25 only)")
+    ev.add_argument("--json", action="store_true", help="machine-readable output")
+
+    sub.add_parser("status", help="show stored sources, snapshots and last change").add_argument(
+        "--metrics", action="store_true", help="show fetch success rate, latency and freshness"
+    )
     return parser
 
 
@@ -70,14 +89,7 @@ def _paths(args) -> config.Paths:
     return base
 
 
-def cmd_fetch(args, paths: config.Paths, store: Store) -> int:
-    try:
-        sources = config.load_sources(paths.sources_path)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    config.ensure_dirs(paths)
-    summaries = fetch_all(sources, store, paths, only=args.only, force=args.force)
+def _print_fetch_summaries(summaries, paths: config.Paths) -> int:
     if not summaries:
         print("No matching sources.")
         return 1
@@ -93,6 +105,33 @@ def cmd_fetch(args, paths: config.Paths, store: Store) -> int:
             print(f"  + {summary.source_id}: snapshot #{summary.snapshot_id}, {summary.message}{extra}")
     print(f"\n{len(summaries) - failures} ok, {failures} failed. DB: {paths.db_path}")
     return 0 if failures == 0 else 1
+
+
+def cmd_fetch(args, paths: config.Paths, store: Store) -> int:
+    try:
+        sources = config.load_sources(paths.sources_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    config.ensure_dirs(paths)
+    summaries = fetch_all(sources, store, paths, only=args.only, force=args.force)
+    return _print_fetch_summaries(summaries, paths)
+
+
+def cmd_run(args, paths: config.Paths, store: Store) -> int:
+    try:
+        sources = config.load_sources(paths.sources_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    config.ensure_dirs(paths)
+    try:
+        with run_lock(paths.data_dir / "run.lock"):
+            summaries = fetch_all(sources, store, paths, only=args.only)
+    except RunLocked as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    return _print_fetch_summaries(summaries, paths)
 
 
 def cmd_diff(args, paths: config.Paths, store: Store) -> int:
@@ -128,6 +167,7 @@ def cmd_search(args, paths: config.Paths, store: Store) -> int:
         top_k=args.top_k,
         source_ids=args.only,
         settings=config.llm_settings(),
+        use_cache=not args.no_cache,
     )
     if not hits:
         print("No matching passages. Fetch sources first, or try other words.")
@@ -147,6 +187,7 @@ def cmd_ask(args, paths: config.Paths, store: Store) -> int:
         top_k=args.top_k,
         settings=config.llm_settings(),
         use_llm=not args.extractive,
+        use_cache=not args.no_cache,
     )
     print(f"Q: {args.question}\n")
     print(answer.text)
@@ -159,12 +200,38 @@ def cmd_ask(args, paths: config.Paths, store: Store) -> int:
     return 0 if answer.mode != "none" else 1
 
 
+def cmd_eval(args, paths: config.Paths, store: Store) -> int:
+    try:
+        questions = evaluate.load_questions(args.questions)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not store.list_sources():
+        print("No sources stored yet. Run `python -m rag_im fetch` or `./run.sh seed-demo`.")
+        return 1
+
+    settings = config.llm_settings()
+    if not args.hybrid:
+        # Evaluation must be deterministic and free by default: no network, no key.
+        settings = LLMSettings(
+            api_key=None,
+            base_url=settings.base_url,
+            chat_model=settings.chat_model,
+            embed_model=settings.embed_model,
+            timeout=settings.timeout,
+        )
+    report = evaluate.evaluate(store, questions, top_k=args.top_k, settings=settings)
+    print(evaluate.to_json(report) if args.json else evaluate.render_report(report))
+    return 0 if report.recall_at(args.top_k) >= args.min_recall else 1
+
+
 def cmd_status(args, paths: config.Paths, store: Store) -> int:
     stats = store.stats()
     print(f"DB: {paths.db_path}")
     print(
         f"sources={stats['sources']} snapshots={stats['snapshots']} "
-        f"sections={stats['sections']} changes={stats['changes']}"
+        f"sections={stats['sections']} changes={stats['changes']} "
+        f"embeddings={stats['embeddings']}"
     )
     sources = store.list_sources()
     if not sources:
@@ -180,14 +247,40 @@ def cmd_status(args, paths: config.Paths, store: Store) -> int:
             f"{store.snapshot_count(source['id']):>6}  "
             f"{(latest.fetched_at if latest else '-'):<21}{change_text}"
         )
+    if getattr(args, "metrics", False):
+        _print_metrics(store)
     return 0
+
+
+def _print_metrics(store: Store) -> None:
+    metrics = store.fetch_run_stats()
+    if not metrics["runs"]:
+        print("\nNo fetch runs recorded yet.")
+        return
+    print(
+        f"\nFetch runs: {metrics['runs']} total, {metrics['ok']} ok, "
+        f"{metrics['errors']} error, p50={metrics['p50_ms']}ms "
+        f"p95={metrics['p95_ms']}ms, last={metrics['last_run']}"
+    )
+    print(f"\n{'ID':<14}{'RUNS':>5}{'OK':>4}{'ERR':>4}{'P50':>7}{'P95':>7}  {'LAST RUN':<21}LAST ERROR")
+    for source in metrics["sources"]:
+        last_error = (source["last_error"] or "-").split("\n")[0]
+        if len(last_error) > 48:
+            last_error = last_error[:45] + "..."
+        print(
+            f"{source['source_id']:<14}{source['runs']:>5}{source['ok']:>4}"
+            f"{source['errors']:>4}{source['p50_ms']:>6}ms{source['p95_ms']:>6}ms  "
+            f"{source['last_run']:<21}{last_error}"
+        )
 
 
 COMMANDS = {
     "fetch": cmd_fetch,
+    "run": cmd_run,
     "diff": cmd_diff,
     "search": cmd_search,
     "ask": cmd_ask,
+    "eval": cmd_eval,
     "status": cmd_status,
 }
 

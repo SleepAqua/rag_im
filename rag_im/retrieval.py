@@ -122,46 +122,113 @@ def passage_text(passage: Passage) -> str:
 
 
 # ------------------------------------------------------------------------ dense
+EMBED_BATCH = 128
+
+
+def _text_key(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _request_embeddings(
+    texts: list[str], settings: LLMSettings
+) -> list[list[float]] | None:
+    """POST to an OpenAI-compatible /embeddings endpoint. ``None`` on failure."""
+    import requests
+
+    try:
+        response = requests.post(
+            f"{settings.base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": settings.embed_model, "input": texts},
+            timeout=settings.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data") or []
+        if len(data) != len(texts):
+            return None
+        # The API may return items out of order; index is authoritative.
+        items = sorted(data, key=lambda item: item.get("index", 0))
+        vectors: list[list[float]] = []
+        for item in items:
+            vector = [float(x) for x in item["embedding"]]
+            if not vector:
+                return None
+            vectors.append(vector)
+        return vectors
+    except Exception:
+        return None
+
+
 def embed_texts(
     texts: list[str],
     settings: LLMSettings | None = None,
     *,
-    cache: dict[str, list[float]] | None = None,
+    embedder: Any = None,
 ) -> list[list[float]] | None:
-    """Embed via an OpenAI-compatible endpoint. ``None`` if unavailable.
-
-    Any failure (no key, network down, bad response) degrades to BM25-only; it
-    is never fatal.
-    """
+    """Embed arbitrary texts. Any failure degrades to BM25; it is never fatal."""
     settings = settings or config.llm_settings()
     if not settings.enabled or not texts:
         return None
-    import requests
+    request = embedder or _request_embeddings
+    return request(list(texts), settings)
 
-    cache = cache if cache is not None else {}
-    missing = [t for t in texts if _cache_key(t) not in cache]
-    if missing:
-        try:
-            response = requests.post(
-                f"{settings.base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {settings.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"model": settings.embed_model, "input": missing},
-                timeout=settings.timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            for text, item in zip(missing, payload["data"]):
-                cache[_cache_key(text)] = [float(x) for x in item["embedding"]]
-        except Exception:
+
+def embed_passages(
+    passages: list[Passage],
+    settings: LLMSettings | None = None,
+    store: Store | None = None,
+    *,
+    use_cache: bool = True,
+    embedder: Any = None,
+) -> list[list[float]] | None:
+    """Embed passages, reusing vectors cached by (model, text hash).
+
+    The cache is the difference between paying for the same 11 documents on
+    every query and paying once; a query still costs one embedding call.
+    """
+    settings = settings or config.llm_settings()
+    if not settings.enabled or not passages:
+        return None
+    request = embedder or _request_embeddings
+    model = settings.embed_model
+    texts = [passage_text(p) for p in passages]
+    keys = [_text_key(t) for t in texts]
+    known = (
+        store.get_embeddings(model, keys)
+        if store is not None and use_cache
+        else {}
+    )
+
+    missing: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for key, text in zip(keys, texts):
+        if key in known or key in seen:
+            continue
+        seen.add(key)
+        missing.append((key, text))
+
+    for start in range(0, len(missing), EMBED_BATCH):
+        batch = missing[start : start + EMBED_BATCH]
+        computed = request([text for _, text in batch], settings)
+        if computed is None or len(computed) != len(batch):
             return None
-    return [cache[_cache_key(t)] for t in texts]
+        fresh: dict[str, list[float]] = {}
+        for (key, _), vector in zip(batch, computed):
+            if not vector:
+                return None
+            known[key] = vector
+            fresh[key] = vector
+        if store is not None and use_cache:
+            store.put_embeddings(model, fresh)
 
-
-def _cache_key(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        return [known[key] for key in keys]
+    except KeyError:
+        return None
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -177,14 +244,21 @@ def dense_scores(
     query: str,
     passages: list[Passage],
     settings: LLMSettings | None = None,
+    store: Store | None = None,
+    *,
+    use_cache: bool = True,
+    embedder: Any = None,
 ) -> list[float] | None:
-    vectors = embed_texts([passage_text(p) for p in passages], settings)
+    vectors = embed_passages(
+        passages, settings, store, use_cache=use_cache, embedder=embedder
+    )
     if vectors is None:
         return None
-    query_vec = embed_texts([query], settings)
-    if not query_vec:
+    query_vectors = embed_texts([query], settings, embedder=embedder)
+    if not query_vectors:
         return None
-    return [_cosine(query_vec[0], vec) for vec in vectors]
+    query_vector = query_vectors[0]
+    return [_cosine(query_vector, vector) for vector in vectors]
 
 
 def reciprocal_rank_fusion(
@@ -205,6 +279,9 @@ class Retriever:
     passages: list[Passage]
     settings: LLMSettings = field(default_factory=config.llm_settings)
     mode: str = "bm25"
+    store: Store | None = None
+    use_cache: bool = True
+    embedder: Any = None
     _bm25: BM25 | None = None
 
     def __post_init__(self) -> None:
@@ -217,7 +294,14 @@ class Retriever:
         bm_scores = self._bm25.scores(query)
         bm_order = sorted(range(len(bm_scores)), key=lambda i: bm_scores[i], reverse=True)
 
-        dense = dense_scores(query, self.passages, self.settings)
+        dense = dense_scores(
+            query,
+            self.passages,
+            self.settings,
+            self.store,
+            use_cache=self.use_cache,
+            embedder=self.embedder,
+        )
         if dense is None:
             self.mode = "bm25"
             ranked = [
@@ -254,6 +338,14 @@ def search(
     top_k: int = 5,
     source_ids: list[str] | None = None,
     settings: LLMSettings | None = None,
+    use_cache: bool = True,
+    embedder: Any = None,
 ) -> list[ScoredPassage]:
     passages = passages_from_store(store, source_ids)
-    return Retriever(passages, settings=settings or config.llm_settings()).search(query, top_k)
+    return Retriever(
+        passages,
+        settings=settings or config.llm_settings(),
+        store=store,
+        use_cache=use_cache,
+        embedder=embedder,
+    ).search(query, top_k)

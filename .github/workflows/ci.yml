@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e .
+      - name: Seed the offline demo database
+        env:
+          RAG_IM_DEMO_DB: demo.sqlite3
+          RAG_IM_REPORTS: reports
+        run: python scripts/seed_demo.py --reset --quiet
+      - name: Retrieval eval gate
+        run: rag-im --db demo.sqlite3 --reports reports eval --min-recall 0.8

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from . import config
 from .config import Paths, Source
@@ -43,6 +44,7 @@ class FetchResult:
     content_sha256: str
     path: Path | None
     unchanged: bool
+    bytes: int = 0
 
 
 def _default_session() -> Any:
@@ -64,6 +66,10 @@ def _utc_stamp(now: datetime | None = None) -> tuple[datetime, str]:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment, moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def http_get(
@@ -150,15 +156,17 @@ def fetch_source(
     moment, stamp = _utc_stamp(now)
     html = http_get(source.url, session=session, sleep=sleep, retries=retries)
     digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    size = len(html.encode("utf-8"))
 
     if previous_sha and digest == previous_sha:
         return FetchResult(
             source_id=source.id,
             url=source.url,
-            fetched_at=moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            fetched_at=_iso(moment),
             content_sha256=digest,
             path=None,
             unchanged=True,
+            bytes=size,
         )
 
     directory = paths.raw_dir / source.id
@@ -171,10 +179,11 @@ def fetch_source(
     return FetchResult(
         source_id=source.id,
         url=source.url,
-        fetched_at=moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        fetched_at=_iso(moment),
         content_sha256=digest,
         path=target,
         unchanged=False,
+        bytes=size,
     )
 
 
@@ -186,6 +195,9 @@ class FetchSummary:
     snapshot_id: int | None = None
     sections: int = 0
     report: Path | None = None
+    changes: int = 0
+    bytes: int = 0
+    latency_ms: int = 0
 
 
 def fetch_all(
@@ -198,17 +210,44 @@ def fetch_all(
     session: Any | None = None,
     now: datetime | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    run_id: str | None = None,
 ) -> list[FetchSummary]:
-    """Fetch, extract, split and persist every source. Errors are per-source."""
+    """Fetch, extract, split and persist every source. Errors are per-source.
+
+    Every source attempt is written to ``fetch_runs`` so success rate, latency
+    and freshness are queryable after the process exits.
+    """
     from .diff import diff_source
 
+    run_id = run_id or (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:6]}"
+    )
     summaries: list[FetchSummary] = []
+
+    def finish(summary: FetchSummary, started_at: str, t0: float) -> None:
+        summary.latency_ms = int((time.perf_counter() - t0) * 1000)
+        store.record_fetch_run(
+            run_id=run_id,
+            source_id=summary.source_id,
+            started_at=started_at,
+            finished_at=_iso(datetime.now(timezone.utc)),
+            status=summary.status,
+            latency_ms=summary.latency_ms,
+            bytes=summary.bytes,
+            sections=summary.sections,
+            changes=summary.changes,
+            message=summary.message,
+        )
+        summaries.append(summary)
+
     for source in sources:
         if only and source.id not in only:
             continue
         store.upsert_source(
             source.id, source.country, source.name, source.url, source.selector
         )
+        started_at = _iso(datetime.now(timezone.utc))
+        t0 = time.perf_counter()
         previous = None if force else store.latest_sha(source.id)
         try:
             result = fetch_source(
@@ -220,11 +259,14 @@ def fetch_all(
                 sleep=sleep,
             )
         except FetchError as exc:
-            summaries.append(FetchSummary(source.id, "error", str(exc)))
+            finish(FetchSummary(source.id, "error", str(exc)), started_at, t0)
             continue
 
         if result.unchanged:
-            summaries.append(FetchSummary(source.id, "unchanged", "content hash matched"))
+            summary = FetchSummary(
+                source.id, "unchanged", "content hash matched", bytes=result.bytes
+            )
+            finish(summary, started_at, t0)
             continue
 
         assert result.path is not None  # unchanged was handled above
@@ -240,14 +282,18 @@ def fetch_all(
             len(sections) < MIN_SECTIONS or body_chars < MIN_BODY_CHARS
         ):
             hint = _diagnose(raw_html)
-            summaries.append(
+            finish(
                 FetchSummary(
                     source.id,
                     "error",
                     f"extracted only {len(text)} chars in {len(sections)} section(s) "
                     f"({body_chars} chars of body) from {len(raw_html)} bytes of HTML; "
                     f"reason: {hint}; raw HTML kept at {result.path}",
-                )
+                    sections=len(sections),
+                    bytes=result.bytes,
+                ),
+                started_at,
+                t0,
             )
             continue
         snapshot_id, created = store.add_snapshot(
@@ -265,11 +311,13 @@ def fetch_all(
             f"{len(sections)} sections",
             snapshot_id=snapshot_id,
             sections=len(sections),
+            bytes=result.bytes,
         )
         if created and store.snapshot_count(source.id) >= 2:
             change_set = diff_source(store, source.id, paths)
             if change_set is not None:
                 summary.report = change_set.report_path
-                summary.message += f", {len(change_set.changes)} change(s)"
-        summaries.append(summary)
+                summary.changes = len(change_set.changes)
+                summary.message += f", {summary.changes} change(s)"
+        finish(summary, started_at, t0)
     return summaries

@@ -1,0 +1,94 @@
+# Labelled retrieval questions over the committed fixtures.
+#
+# Each entry names the one section a correct answer must come from. The latest
+# AU snapshot is au_189_v2, where "English language" was renamed and a
+# "Changes from 1 July 2026" section was added.
+#
+# Add a question whenever you add a source or change the chunking strategy; the
+# CI gate is only useful if this file tracks the corpus.
+
+questions:
+  - id: au-visa-purpose
+    question: Is the 189 visa permanent, and do I need an employer sponsor?
+    source: au_189
+    anchor: overview
+
+  - id: au-invitation-requirements
+    question: What requirements must I meet to be invited to apply?
+    source: au_189
+    anchor: eligibility
+
+  - id: au-age-limit
+    question: How old can I be when I am invited?
+    source: au_189
+    anchor: eligibility
+
+  - id: au-points-pass-mark
+    question: What is the minimum points score needed for an invitation?
+    source: au_189
+    anchor: points-requirement
+
+  - id: au-competitive-score
+    question: Is the pass mark enough in practice, or do I need a higher score?
+    source: au_189
+    anchor: points-requirement
+
+  - id: au-processing-time
+    question: How long do most applications take to be finalised?
+    source: au_189
+    anchor: processing-times
+
+  - id: au-english-evidence
+    question: What evidence can I use to show competent English?
+    source: au_189
+    anchor: english-language-requirements
+
+  - id: au-july-changes
+    question: What changed on 1 July 2026?
+    source: au_189
+    anchor: changes-from-1-july-2026
+
+  - id: au-july-age-change
+    question: Does the minimum age for invited applicants change, and to what?
+    source: au_189
+    anchor: changes-from-1-july-2026
+
+  - id: au-july-pass-mark
+    question: What is the points pass mark after 1 July 2026?
+    source: au_189
+    anchor: changes-from-1-july-2026
+
+  - id: au-prior-invitations
+    question: Which rules apply if I was invited before 1 July 2026?
+    source: au_189
+    anchor: changes-from-1-july-2026
+
+  - id: nl-salary-over-30
+    question: What gross monthly salary do I need if I am 30 or older?
+    source: nl_hsm
+    anchor: salary-threshold
+
+  - id: nl-salary-under-30
+    question: What is the salary threshold for applicants under 30?
+    source: nl_hsm
+    anchor: salary-threshold
+
+  - id: nl-sponsor-requirement
+    question: Does my employer need to be a recognised sponsor?
+    source: nl_hsm
+    anchor: recognised-sponsor
+
+  - id: nl-who-applies
+    question: Who submits the application on my behalf?
+    source: nl_hsm
+    anchor: application
+
+  - id: nl-decision-time
+    question: How quickly does the IND decide applications from recognised sponsors?
+    source: nl_hsm
+    anchor: application
+
+  - id: nl-overview
+    question: What is required to work in the Netherlands as a highly skilled migrant?
+    source: nl_hsm
+    anchor: highly-skilled-migrant

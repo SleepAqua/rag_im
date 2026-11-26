@@ -1,0 +1,10 @@
+[Unit]
+Description=Run rag-im once a day
+
+[Timer]
+OnCalendar=*-*-* 06:15:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -63,7 +63,7 @@ No misses in the top 5.
 
 ```console
 $ ./run.sh status
-DB: /home/louis/coding/rag_im/data/demo.sqlite3
+DB: /path/to/rag_im/data/demo.sqlite3
 sources=2 snapshots=3 sections=18 changes=5 embeddings=0
 model: no endpoint configured · BM25 only
 

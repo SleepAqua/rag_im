@@ -46,12 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--top-k", type=int, default=5)
     search.add_argument("--source", action="append", dest="only", metavar="ID")
     search.add_argument("--no-cache", action="store_true", help="ignore cached embeddings")
+    search.add_argument("--provider", choices=config.PROVIDERS,
+                        help="endpoint profile (default: $RAG_IM_PROVIDER or auto)")
 
     ask = sub.add_parser("ask", help="answer a question from stored passages")
     ask.add_argument("question")
     ask.add_argument("--top-k", type=int, default=5)
     ask.add_argument("--extractive", action="store_true", help="skip the LLM even if configured")
     ask.add_argument("--no-cache", action="store_true", help="ignore cached embeddings")
+    ask.add_argument("--provider", choices=config.PROVIDERS,
+                     help="endpoint profile (default: $RAG_IM_PROVIDER or auto)")
 
     ev = sub.add_parser("eval", help="score retrieval against labelled questions")
     ev.add_argument("--questions", help="question set (default: eval/questions.yaml or $RAG_IM_EVAL_QUESTIONS)")
@@ -59,7 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--min-recall", type=float, default=0.0,
                     help="exit 1 if recall@top-k is below this fraction (default: report only)")
     ev.add_argument("--hybrid", action="store_true",
-                    help="also use dense retrieval (needs an API key; default is BM25 only)")
+                    help="also use dense retrieval (needs an embedding-capable provider)")
+    ev.add_argument("--provider", choices=config.PROVIDERS,
+                    help="endpoint profile for --hybrid (default: $RAG_IM_PROVIDER or auto)")
     ev.add_argument("--json", action="store_true", help="machine-readable output")
 
     sub.add_parser("status", help="show stored sources, snapshots and last change").add_argument(
@@ -166,7 +172,7 @@ def cmd_search(args, paths: config.Paths, store: Store) -> int:
         store,
         top_k=args.top_k,
         source_ids=args.only,
-        settings=config.llm_settings(),
+        settings=config.llm_settings(provider=args.provider),
         use_cache=not args.no_cache,
     )
     if not hits:
@@ -185,7 +191,7 @@ def cmd_ask(args, paths: config.Paths, store: Store) -> int:
         args.question,
         store,
         top_k=args.top_k,
-        settings=config.llm_settings(),
+        settings=config.llm_settings(provider=args.provider),
         use_llm=not args.extractive,
         use_cache=not args.no_cache,
     )
@@ -196,7 +202,8 @@ def cmd_ask(args, paths: config.Paths, store: Store) -> int:
         for idx, hit in enumerate(answer.passages, start=1):
             p = hit.passage
             print(f"  [{idx}] {p.citation} — {p.url}")
-    print(f"\n(mode: {answer.mode})")
+    used = f" · {answer.provider}/{answer.model}" if answer.mode == "llm" else ""
+    print(f"\n(mode: {answer.mode}{used})")
     return 0 if answer.mode != "none" else 1
 
 
@@ -210,7 +217,7 @@ def cmd_eval(args, paths: config.Paths, store: Store) -> int:
         print("No sources stored yet. Run `python -m rag_im fetch` or `./run.sh seed-demo`.")
         return 1
 
-    settings = config.llm_settings()
+    settings = config.llm_settings(provider=args.provider)
     if not args.hybrid:
         # Evaluation must be deterministic and free by default: no network, no key.
         settings = LLMSettings(
@@ -219,7 +226,12 @@ def cmd_eval(args, paths: config.Paths, store: Store) -> int:
             chat_model=settings.chat_model,
             embed_model=settings.embed_model,
             timeout=settings.timeout,
+            provider="none",
+            embeddings=False,
         )
+    elif not settings.dense:
+        print("warning: --hybrid requested but this provider has no embeddings; using BM25",
+              file=sys.stderr)
     report = evaluate.evaluate(store, questions, top_k=args.top_k, settings=settings)
     print(evaluate.to_json(report) if args.json else evaluate.render_report(report))
     return 0 if report.recall_at(args.top_k) >= args.min_recall else 1
@@ -233,6 +245,8 @@ def cmd_status(args, paths: config.Paths, store: Store) -> int:
         f"sections={stats['sections']} changes={stats['changes']} "
         f"embeddings={stats['embeddings']}"
     )
+    settings = config.llm_settings()
+    print(f"model: {settings.label}" + (" · dense" if settings.dense else " · BM25 only"))
     sources = store.list_sources()
     if not sources:
         print("\nNothing stored yet. Run `python -m rag_im fetch`.")

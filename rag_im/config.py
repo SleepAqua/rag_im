@@ -7,6 +7,7 @@ CI never touch the real ``data/`` directory:
     RAG_IM_DB         sqlite file (default: <data>/policy.sqlite3)
     RAG_IM_SOURCES    sources.yaml (default: <repo>/sources.yaml)
     RAG_IM_REPORTS    report directory (default: <repo>/reports)
+    RAG_IM_PROVIDER   auto|local|hermes|opencode|cloud|none (default: auto)
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 USER_AGENT = (
-    "rag-im/0.3 (immigration policy monitor; "
+    "rag-im/0.4 (immigration policy monitor; "
     "+https://github.com/SleepAqua/rag_im) python-requests"
 )
 
@@ -118,36 +119,135 @@ def load_sources(path: str | Path | None = None) -> list[Source]:
     return sources
 
 
+PROVIDERS = ("auto", "local", "hermes", "opencode", "cloud", "none")
+
+
 @dataclass(frozen=True)
 class LLMSettings:
-    """Any OpenAI-compatible endpoint. No key means BM25-only, never an error."""
+    """An OpenAI-compatible endpoint plus its profile.
+
+    ``provider`` decides whether a key is required: local llama.cpp, the Hermes
+    proxy and OpenCode Zen all accept requests without one. ``embeddings`` is
+    separate because a chat server is not necessarily an embedding server.
+    """
 
     api_key: str | None
     base_url: str
     chat_model: str
     embed_model: str
     timeout: float
+    provider: str = "auto"
+    embeddings: bool = True
 
     @property
     def enabled(self) -> bool:
+        if self.provider == "none":
+            return False
+        if self.provider in {"local", "hermes", "opencode"}:
+            return True
         return bool(self.api_key)
 
     @property
+    def dense(self) -> bool:
+        return self.enabled and self.embeddings
+
+    @property
     def label(self) -> str:
-        return f"{self.base_url.rstrip('/')} ({self.chat_model})" if self.enabled else "no endpoint configured"
+        if not self.enabled:
+            return "no endpoint configured"
+        return f"{self.provider} · {self.chat_model} @ {self.base_url.rstrip('/')}"
 
 
-def llm_settings() -> LLMSettings:
-    key = os.environ.get("RAG_IM_API_KEY") or os.environ.get("OPENAI_API_KEY") or None
-    base = (
-        os.environ.get("RAG_IM_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    )
+def _env(name: str, *fallbacks: str) -> str | None:
+    for key in (name, *fallbacks):
+        value = os.environ.get(key)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def llm_settings(provider: str | None = None) -> LLMSettings:
+    """Resolve a provider profile from an explicit argument or the environment.
+
+    Profiles:
+      auto      cloud if an API key is present, otherwise BM25-only (default)
+      local     llama.cpp / Ollama / LM Studio, default Qwen on :8000
+      hermes    ``hermes proxy start`` OpenAI-compatible proxy on :8645
+      opencode  OpenCode Zen OpenAI-compatible endpoint
+      cloud     any OpenAI-compatible endpoint that needs a key
+      none      disable the model entirely
+    """
+    name = (provider or os.environ.get("RAG_IM_PROVIDER") or "auto").strip().lower()
+    if name == "openai":
+        name = "cloud"
+    if name not in PROVIDERS:
+        raise ValueError(
+            f"unknown provider {name!r}; choose one of: {', '.join(PROVIDERS)}"
+        )
+    timeout = float(os.environ.get("RAG_IM_LLM_TIMEOUT", "60"))
+
+    if name == "none":
+        return LLMSettings(None, "", "", "", timeout, provider="none", embeddings=False)
+
+    if name == "local":
+        base = _env("RAG_IM_LOCAL_BASE_URL", "RAG_IM_BASE_URL") or "http://127.0.0.1:8000/v1"
+        chat = _env("RAG_IM_LOCAL_MODEL", "RAG_IM_CHAT_MODEL") or "qwen3.5-2b"
+        return LLMSettings(
+            api_key=_env("RAG_IM_LOCAL_API_KEY"),
+            base_url=base.rstrip("/"),
+            chat_model=chat,
+            embed_model=_env("RAG_IM_LOCAL_EMBED_MODEL", "RAG_IM_EMBED_MODEL") or chat,
+            timeout=timeout,
+            provider="local",
+            embeddings=_env_bool("RAG_IM_LOCAL_EMBEDDINGS", False),
+        )
+
+    if name == "hermes":
+        return LLMSettings(
+            # The proxy accepts any bearer token and attaches the real credential.
+            api_key=_env("RAG_IM_HERMES_API_KEY") or "local",
+            base_url=(_env("RAG_IM_HERMES_BASE_URL") or "http://127.0.0.1:8645/v1").rstrip("/"),
+            chat_model=_env("RAG_IM_HERMES_MODEL") or "upstage/solar-mini4:free",
+            embed_model=_env("RAG_IM_HERMES_EMBED_MODEL") or "qwen/qwen3-embedding-8b",
+            timeout=timeout,
+            provider="hermes",
+            embeddings=_env_bool("RAG_IM_HERMES_EMBEDDINGS", False),
+        )
+
+    if name == "opencode":
+        return LLMSettings(
+            api_key=_env("RAG_IM_OPENCODE_API_KEY"),
+            base_url=(_env("RAG_IM_OPENCODE_BASE_URL") or "https://opencode.ai/zen/v1").rstrip("/"),
+            chat_model=_env("RAG_IM_OPENCODE_MODEL") or "deepseek-v4.1-flash-free",
+            embed_model=_env("RAG_IM_OPENCODE_EMBED_MODEL") or "text-embedding-3-small",
+            timeout=timeout,
+            provider="opencode",
+            embeddings=_env_bool("RAG_IM_OPENCODE_EMBEDDINGS", False),
+        )
+
+    # cloud / auto
+    key = _env("RAG_IM_API_KEY", "OPENAI_API_KEY")
+    base = _env("RAG_IM_BASE_URL", "OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    chat = _env("RAG_IM_CHAT_MODEL") or "gpt-4o-mini"
+    embed = _env("RAG_IM_EMBED_MODEL") or "text-embedding-3-small"
+    if name == "auto" and not key:
+        return LLMSettings(
+            None, base.rstrip("/"), chat, embed, timeout,
+            provider="none", embeddings=False,
+        )
     return LLMSettings(
-        api_key=key,
-        base_url=base.rstrip("/"),
-        chat_model=os.environ.get("RAG_IM_CHAT_MODEL", "gpt-4o-mini"),
-        embed_model=os.environ.get("RAG_IM_EMBED_MODEL", "text-embedding-3-small"),
-        timeout=float(os.environ.get("RAG_IM_LLM_TIMEOUT", "60")),
+        key,
+        base.rstrip("/"),
+        chat,
+        embed,
+        timeout,
+        provider="cloud",
+        embeddings=_env_bool("RAG_IM_EMBEDDINGS", True),
     )

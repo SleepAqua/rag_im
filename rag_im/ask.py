@@ -24,10 +24,12 @@ CITATION_RE = re.compile(r"\[(\d{1,2})\]")
 
 SYSTEM_PROMPT = (
     "You answer questions about immigration policy using ONLY the numbered "
-    "passages supplied by the user. Cite the passages you use as [1], [2], ... "
-    "matching their numbers. If the passages do not answer the question, say so "
-    "plainly. Never cite a passage number that was not supplied. Never state a "
-    "policy detail that is absent from the passages."
+    "passages supplied by the user. Start with a direct one-sentence answer, "
+    "then at most three short supporting sentences. If the passages state a "
+    "number, threshold or date, quote it exactly. Cite the passages you use as "
+    "[1], [2], ... matching their numbers. If the passages do not answer the "
+    "question, say so plainly. Never cite a passage number that was not "
+    "supplied. Never state a policy detail that is absent from the passages."
 )
 
 
@@ -38,6 +40,7 @@ class Answer:
     passages: list[ScoredPassage] = field(default_factory=list)
     mode: str = "extractive"
     model: str | None = None
+    provider: str | None = None
 
     @property
     def citations(self) -> list[str]:
@@ -88,7 +91,7 @@ def extractive_answer(question: str, hits: list[ScoredPassage], top_k: int = 5) 
             mode="none",
         )
     lines = [
-        "Extractive answer (no LLM endpoint configured) — the most relevant passages, verbatim:",
+        "Extractive answer (LLM not used) — the most relevant passages, verbatim:",
         "",
     ]
     for idx, hit in enumerate(hits[:top_k], start=1):
@@ -115,6 +118,7 @@ def llm_answer(
     payload = {
         "model": settings.chat_model,
         "temperature": 0.0,
+        "max_tokens": 600,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -123,10 +127,9 @@ def llm_answer(
             },
         ],
     }
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if settings.api_key:
+        headers["Authorization"] = f"Bearer {settings.api_key}"
     try:
         if session is not None:
             response = session.post(
@@ -152,6 +155,7 @@ def llm_answer(
         passages=hits[: len(hits)],
         mode="llm",
         model=settings.chat_model,
+        provider=settings.provider,
     )
 
 

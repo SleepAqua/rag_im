@@ -10,6 +10,10 @@ badly structured for machines, and quietly edited. This tool snapshots the
 pages you care about, tells you *which section* changed and *what wording*
 changed, and answers questions with citations back to the exact page.
 
+It runs the answer model locally by default — Qwen 3.5 2B through llama.cpp,
+no API key — and can switch to a cloud endpoint with one variable. BM25 keeps
+search working even when no model is running.
+
 It replaced a 48-line LlamaIndex + Chroma script that hardcoded OpenAI
 embeddings and only worked with a key and a network connection.
 
@@ -27,9 +31,10 @@ embeddings and only worked with a key and a network connection.
 5. **Diff** — compare the two most recent snapshots of a source, classify
    sections as added / removed / modified / moved, and write a markdown report
    with before/after snippets and a word-level diff.
-6. **Search / ask** — BM25 always works offline; an OpenAI-compatible endpoint
-   optionally adds dense retrieval fused with reciprocal-rank fusion, and can
-   draft the answer. Citations are always passages that actually exist.
+6. **Search / ask** — BM25 always works offline; an embedding-capable provider
+   optionally adds dense retrieval fused with reciprocal-rank fusion, and a
+   local Qwen or cloud chat model drafts the answer. Citations are always
+   passages that actually exist.
 7. **Evaluate** — a labelled question set scores retrieval (recall@1/3/5, MRR)
    and gates CI when quality drops.
 8. **Run** — `rag-im run` takes a file lock, fetches, diffs, records latency and
@@ -131,6 +136,74 @@ export RAG_IM_DB=data/demo.sqlite3   # the demo DB is separate from live state
 through the same store/diff code paths, so the whole pipeline can be exercised
 with no network.
 
+## Models and providers
+
+`RAG_IM_PROVIDER` picks the endpoint profile. `./run.sh` sources a gitignored
+`.env`; copy `.env.example` to `.env` to keep machine-local defaults.
+
+| Provider | Endpoint | Default model | Key | Dense |
+|---|---|---|---|---|
+| `local` | `http://127.0.0.1:8000/v1` | `qwen3.5-2b` | no | off unless llama.cpp has `--embedding` |
+| `hermes` | `http://127.0.0.1:8645/v1` | `upstage/solar-mini4:free` | no | off |
+| `opencode` | `https://opencode.ai/zen/v1` | `deepseek-v4.1-flash-free` | no | off |
+| `cloud` | any OpenAI-compatible | `gpt-4o-mini` | yes | on |
+| `none` | — | — | — | — |
+| `auto` | cloud if a key is set, otherwise BM25-only | — | — | — |
+
+The profile can also be chosen per command with `--provider`:
+
+```bash
+./run.sh ask "What is the points requirement?" --provider local
+./run.sh ask "What is the points requirement?" --provider hermes
+```
+
+### Local Qwen
+
+Start llama.cpp once (the model alias becomes `RAG_IM_LOCAL_MODEL`):
+
+```bash
+python -m llama_cpp.server \
+  --model ~/models/qwen3.5-2b/Qwen3.5-2B-Q4_K_M.gguf \
+  --model_alias qwen3.5-2b \
+  --n_ctx 24576 --host 127.0.0.1 --port 8000
+```
+
+The chat endpoint works without a key. llama.cpp only serves `/v1/embeddings`
+when it was started with `--embedding`; until then retrieval stays BM25, which
+is why `RAG_IM_LOCAL_EMBEDDINGS` defaults to `0`. Set it to `1` (and
+`RAG_IM_LOCAL_EMBED_MODEL` if the embedding model differs) after enabling
+embeddings.
+
+### Cloud fallback
+
+Hermes exposes an OpenAI-compatible proxy for its providers:
+
+```bash
+hermes proxy start --port 8645
+RAG_IM_PROVIDER=hermes ./run.sh ask "What is the points requirement?"
+```
+
+The proxy accepts any bearer token and attaches the real credential. The default
+model is a free one; override `RAG_IM_HERMES_MODEL` if it is unavailable.
+OpenCode Zen is also OpenAI-compatible:
+
+```bash
+RAG_IM_PROVIDER=opencode ./run.sh ask "What is the points requirement?"
+```
+
+Its free tier is rate-limited. For any other endpoint, use `cloud`:
+
+```bash
+export RAG_IM_PROVIDER=cloud
+export RAG_IM_API_KEY=sk-...
+export RAG_IM_BASE_URL=https://api.openai.com/v1
+export RAG_IM_CHAT_MODEL=gpt-4o-mini
+export RAG_IM_EMBED_MODEL=text-embedding-3-small
+```
+
+If the endpoint errors, times out, or cites a passage that was not supplied,
+the answer falls back to the extractive response.
+
 ## Retrieval evaluation
 
 Retrieval quality is measured, not assumed. `eval/questions.yaml` pairs each
@@ -186,6 +259,7 @@ Every attempt is written to the `fetch_runs` table:
 
 ```console
 $ ./run.sh status --metrics
+model: no endpoint configured · BM25 only
 Fetch runs: 2 total, 2 ok, 0 error, p50=72ms p95=76ms, last=2026-11-25T09:13:38Z
 
 ID             RUNS  OK ERR    P50    P95  LAST RUN             LAST ERROR
@@ -201,7 +275,7 @@ Copy `deploy/rag-im.service` and `deploy/rag-im.timer` for a daily systemd run;
 ./run.sh test
 ```
 
-123 tests, fully offline: extraction noise removal, section splitting, hash
+135 tests, fully offline: provider selection, extraction noise removal, section splitting, hash
 stability under reflow, added/removed/modified/moved classification, BM25
 ranking, RRF, embedding-cache reuse, store idempotency, fetch retries/timeouts,
 run locks, eval metrics, and CLI smoke tests. CI runs the suite on Python
@@ -217,20 +291,13 @@ Everything except live fetching works with no network and no API key:
 - **Diff, store, search, eval** are local. BM25 is pure Python — no model
   download.
 - **Ask** returns an extractive answer (the best passages, verbatim, with
-  citations) when no endpoint is configured.
-- **Dense retrieval and LLM answers** are opt-in:
-
-```bash
-export OPENAI_API_KEY=sk-...                        # any OpenAI-compatible key
-export RAG_IM_BASE_URL=https://api.openai.com/v1    # optional
-export RAG_IM_CHAT_MODEL=gpt-4o-mini                # optional
-export RAG_IM_EMBED_MODEL=text-embedding-3-small    # optional
-```
-
-With a key, search fuses BM25 and embeddings via RRF; ask sends numbered
-passages to chat completions. If the endpoint errors, times out, or cites a
-passage number that was never supplied, the code falls back to the extractive
-answer — it never prints a citation it cannot back with a stored passage.
+  citations) when no model is configured or the configured model fails.
+- **Dense retrieval and LLM answers** are opt-in through the provider profiles
+  above. With an embedding-capable provider, search fuses BM25 and embeddings
+  via RRF; ask sends numbered passages to chat completions. If the endpoint
+  errors, times out, or cites a passage number that was never supplied, the code
+  falls back to the extractive answer — it never prints a citation it cannot
+  back with a stored passage.
 
 ## Design decisions
 

@@ -106,6 +106,26 @@ class TestEmbeddingCache(unittest.TestCase):
         # Document vectors were still cached even though the query call failed.
         self.assertEqual(self.store.embedding_count(), 11)
 
+    def test_provider_without_embeddings_skips_embedder(self):
+        local = LLMSettings(
+            None,
+            "http://127.0.0.1:8000/v1",
+            "qwen3.5-2b",
+            "qwen3.5-2b",
+            1,
+            provider="local",
+            embeddings=False,
+        )
+        fake = FakeEmbedder()
+        retriever = Retriever(
+            passages_from_store(self.store), settings=local, store=self.store, embedder=fake
+        )
+        hits = retriever.search("points requirement", top_k=3)
+        self.assertEqual(retriever.mode, "bm25")
+        self.assertTrue(hits)
+        self.assertEqual(fake.batches, [])
+        self.assertEqual(self.store.embedding_count(), 0)
+
     def test_clear_embeddings(self):
         search("salary", self.store, top_k=1, settings=enabled(), embedder=FakeEmbedder())
         self.assertEqual(self.store.embedding_count(), 11)

@@ -1,8 +1,8 @@
 """Retrieval: BM25 always, dense embeddings optionally, RRF when both exist.
 
 BM25 is pure Python so search works offline with no key and no model download.
-A key only enables an extra ranking that is fused with reciprocal-rank fusion;
-losing it changes quality, never correctness.
+An embedding-capable provider only adds an extra ranking fused with reciprocal
+rank fusion; losing it changes quality, never correctness.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def embed_texts(
 ) -> list[list[float]] | None:
     """Embed arbitrary texts. Any failure degrades to BM25; it is never fatal."""
     settings = settings or config.llm_settings()
-    if not settings.enabled or not texts:
+    if not settings.dense or not texts:
         return None
     request = embedder or _request_embeddings
     return request(list(texts), settings)
@@ -191,7 +191,7 @@ def embed_passages(
     every query and paying once; a query still costs one embedding call.
     """
     settings = settings or config.llm_settings()
-    if not settings.enabled or not passages:
+    if not settings.dense or not passages:
         return None
     request = embedder or _request_embeddings
     model = settings.embed_model

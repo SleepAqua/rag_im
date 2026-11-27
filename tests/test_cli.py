@@ -43,6 +43,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("au_189", out)
         self.assertIn("snapshots=2", out)
+        self.assertIn("model:", out)
 
     def test_search_prints_ranked_passages(self):
         self.seed()

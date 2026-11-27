@@ -32,9 +32,11 @@ class FakeChatSession:
     def __init__(self, content):
         self.content = content
         self.payload = None
+        self.headers = None
 
     def post(self, url, json=None, headers=None, timeout=None):
         self.payload = json
+        self.headers = headers
         return FakeChatResponse(self.content)
 
 
@@ -129,6 +131,23 @@ class TestLLMPath(unittest.TestCase):
 
     def test_empty_hits_never_calls_llm(self):
         self.assertIsNone(llm_answer("anything", [], with_key()))
+
+    def test_local_provider_needs_no_key_and_sends_no_auth_header(self):
+        local = LLMSettings(
+            None,
+            "http://127.0.0.1:8000/v1",
+            "qwen3.5-2b",
+            "qwen3.5-2b",
+            1,
+            provider="local",
+            embeddings=False,
+        )
+        session = FakeChatSession("You need 67 points [1].")
+        answer = llm_answer("points requirement", self.hits, local, session=session)
+        self.assertIsNotNone(answer)
+        self.assertEqual(answer.provider, "local")
+        self.assertEqual(answer.model, "qwen3.5-2b")
+        self.assertNotIn("Authorization", session.headers)
 
 
 if __name__ == "__main__":

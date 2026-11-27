@@ -3,6 +3,13 @@
 # Override the interpreter with PYTHON=/path/to/python if needed.
 set -euo pipefail
 cd "$(dirname "$0")"
+# Machine-local defaults (provider, model, endpoint). Never committed.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+fi
 if [ -z "${PYTHON:-}" ] && [ -x ".venv/bin/python" ]; then
   PYTHON=".venv/bin/python"
 else

@@ -32,7 +32,7 @@ $ ./run.sh search "points requirement" --top-k 3
 $ ./run.sh ask "What is the points requirement for the 189 visa?" --extractive --top-k 2
 Q: What is the points requirement for the 189 visa?
 
-Extractive answer (no LLM endpoint configured) — the most relevant passages, verbatim:
+Extractive answer (LLM not used) — the most relevant passages, verbatim:
 
 [1] AU · Skilled Independent visa (subclass 189) — "Points requirement"
 You must score at least 67 points on the points test to be eligible for an invitation. Points are awarded for age, English language ability, skilled employment experience and qualifications. Invitations are issued to the highest scoring candidates in each occupation, so in practice the competitive score is often higher than the pass mark.
@@ -65,6 +65,7 @@ No misses in the top 5.
 $ ./run.sh status
 DB: /home/louis/coding/rag_im/data/demo.sqlite3
 sources=2 snapshots=3 sections=18 changes=5 embeddings=0
+model: no endpoint configured · BM25 only
 
 ID            CC    SNAPS  LAST FETCH           LAST CHANGE
 au_189        AU        2  2026-10-31T09:00:00Z moved: English language requirements
